@@ -24,6 +24,24 @@ class JmPuncher:
         if hasattr(JmModuleConfig, 'APP_COOKIES'):
             delattr(JmModuleConfig, 'APP_COOKIES')
 
+    @staticmethod
+    def _safe_extract_data(resp):
+        """
+        安全提取 API 响应数据
+        优先使用 res_data（自动解密），失败时回退到原始 json
+        """
+        try:
+            return resp.res_data
+        except Exception:
+            # 某些接口返回格式不同，data 字段可能为空或非加密格式
+            raw = resp.json()
+            logging.debug(f"res_data 解密失败，使用原始响应: {raw}")
+            # 如果有 data 字段但解密失败，直接返回 data（可能是明文）
+            if raw.get('data') is not None and not isinstance(raw.get('data'), str):
+                return raw['data']
+            # 否则返回整个 json 响应
+            return raw
+
     def _get_daily_task_list(self, client):
         """
         获取当年签到任务列表
@@ -37,7 +55,7 @@ class JmPuncher:
             get=False,
             data={'data': year},
         )
-        return resp.res_data
+        return self._safe_extract_data(resp)
 
     def _do_daily_checkin(self, client, user_id, daily_id):
         """
@@ -51,7 +69,7 @@ class JmPuncher:
             get=False,
             data={'user_id': user_id, 'daily_id': daily_id},
         )
-        return resp.res_data
+        return self._safe_extract_data(resp)
 
     def run(self):
         try:
@@ -94,7 +112,16 @@ class JmPuncher:
             # ========== 第二步：获取签到任务列表 ==========
             logging.info("正在获取签到任务列表...")
             daily_list_data = self._get_daily_task_list(client)
-            task_list = daily_list_data.get("list", [])
+            logging.info(f"签到任务列表响应: {daily_list_data}")
+
+            # 兼容不同的响应结构
+            if isinstance(daily_list_data, dict):
+                task_list = daily_list_data.get("list", [])
+            elif isinstance(daily_list_data, list):
+                task_list = daily_list_data
+            else:
+                logging.error(f"⚠️ 签到任务列表格式异常: {type(daily_list_data)}, 内容: {daily_list_data}")
+                return False
 
             if not task_list:
                 logging.warning("⚠️ 签到任务列表为空，当前无可用签到任务")
@@ -114,11 +141,17 @@ class JmPuncher:
             # ========== 第三步：执行签到 ==========
             logging.info("正在执行签到...")
             checkin_result = self._do_daily_checkin(client, user_id, daily_id)
+            logging.debug(f"签到原始响应: {checkin_result}")
 
-            # 解析签到结果
-            msg = checkin_result.get("msg", "")
-            success = checkin_result.get("success", False)
-            message = checkin_result.get("message", "")
+            # 解析签到结果（兼容不同响应格式）
+            if isinstance(checkin_result, dict):
+                msg = checkin_result.get("msg", "")
+                success = checkin_result.get("success", False)
+                message = checkin_result.get("message", "")
+            else:
+                msg = str(checkin_result)
+                success = True
+                message = ""
 
             if msg == "今天已经签到过了":
                 logging.info("✅ 今天已经签到过了，无需重复签到")
